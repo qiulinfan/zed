@@ -22,3 +22,5 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [env]
 MACOSX_DEPLOYMENT_TARGET = "10.15.7"
+# Personal fork: never poll or install official Zed updates over this build.
+ZED_UPDATE_EXPLANATION = "This is a personal fork of Zed built from source. Update it by rebuilding the fork."
