@@ -794,7 +794,7 @@ impl Settings for AgentSettings {
                 None
             },
             flexible: agent.flexible.unwrap(),
-            default_model: Some(agent.default_model.unwrap()),
+            default_model: agent.default_model,
             subagent_model: agent.subagent_model,
             inline_assistant_model: agent.inline_assistant_model,
             inline_assistant_use_streaming_tools: agent

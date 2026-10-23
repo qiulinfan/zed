@@ -624,11 +624,11 @@
     // Whether to show onboarding banners in the titlebar.
     "show_onboarding_banner": true,
     // Whether to show user picture in the titlebar.
-    "show_user_picture": true,
+    "show_user_picture": false,
     // Whether to show the user menu in the titlebar.
     "show_user_menu": true,
     // Whether to show the sign in button in the titlebar.
-    "show_sign_in": true,
+    "show_sign_in": false,
     // Whether to show the menus in the titlebar.
     "show_menus": false,
     // Whether to open the menus in the titlebar on hover.
@@ -1068,7 +1068,7 @@
   },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar.
-    "button": true,
+    "button": false,
     // Where to dock the collaboration panel. Can be 'left' or 'right'.
     "dock": "right",
     // Default width of the collaboration panel.
@@ -1200,14 +1200,7 @@
     // Content will be centered within the panel.
     "max_content_width": 850,
     // The default model to use when creating new threads.
-    "default_model": {
-      // The provider to use.
-      "provider": "zed.dev",
-      // The model to use.
-      "model": "claude-sonnet-4",
-      // Whether thinking is enabled.
-      "enable_thinking": false,
-    },
+    "default_model": null,
     // Additional parameters for language model requests. When making a request to a model, parameters will be taken
     // from the last entry in this list that matches the model's provider and name. In each entry, both provider
     // and model are optional, so that you can specify parameters for either one.
@@ -1290,7 +1283,7 @@
       "threshold": "90%",
     },
     // When enabled, show voting thumbs for feedback on agent edits.
-    "enable_feedback": true,
+    "enable_feedback": false,
     "default_profile": "write",
     "profiles": {
       "write": {
@@ -1413,7 +1406,7 @@
     "show_merge_conflict_indicator": true,
   },
   // Whether the screen sharing icon is shown in the os status bar.
-  "show_call_status_icon": true,
+  "show_call_status_icon": false,
   // Whether to use language servers to provide code intelligence.
   "enable_language_server": true,
   // Whether to perform linked edits of associated ranges, if the language server supports it.
@@ -1708,9 +1701,9 @@
   // Control what info is collected by Zed.
   "telemetry": {
     // Send debug info like crash reports.
-    "diagnostics": true,
+    "diagnostics": false,
     // Send anonymized usage data like what languages you're using Zed with.
-    "metrics": true,
+    "metrics": false,
     // Allow sending requests to Anthropic models that cannot be offered with
     // Zero Data Retention
     "anthropic_retention": false,
@@ -1721,7 +1714,7 @@
   "disable_ai": false,
   // Automatically update Zed. This setting may be ignored on Linux if
   // installed through a package manager.
-  "auto_update": true,
+  "auto_update": false,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
   // Possible values:
@@ -1916,7 +1909,7 @@
   "load_direnv": "direct",
   "edit_predictions": {
     // Which edit prediction provider to use.
-    "provider": "zed",
+    "provider": "none",
     // Disable edit predictions for files matching these glob patterns.
     //
     // Use `"..."` to add patterns without repeating Zed's defaults. In project
