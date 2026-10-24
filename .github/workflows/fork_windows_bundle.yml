@@ -51,6 +51,18 @@ jobs:
         shell: pwsh
         run: ./script/bundle-windows.ps1
 
+      # The installed layout without the installer, so a machine replaces its
+      # %LOCALAPPDATA%\Programs\Zed in place and its shortcuts keep working. The
+      # unsigned appx for the Explorer menu and the arm64 console are left out.
+      - name: Package the install layout
+        shell: pwsh
+        run: |
+          $layout = 'inno/x86_64'
+          $items = 'Zed.exe', 'conpty.dll', 'amd_ags_x64.dll', 'bin', 'tools', 'x64' | ForEach-Object { Join-Path $layout $_ }
+          $missing = $items | Where-Object { -not (Test-Path $_) }
+          if ($missing) { throw "Missing from the bundle layout: $($missing -join ', ')" }
+          Compress-Archive -Path $items -DestinationPath target/Zed-x86_64.zip -Force
+
       - name: Publish release
         shell: pwsh
         env:
@@ -59,8 +71,8 @@ jobs:
           $version = (Get-Content crates/zed/Cargo.toml | Select-String '^version = "(.+)"').Matches[0].Groups[1].Value
           $sha = $env:GITHUB_SHA.Substring(0, 10)
           $tag = "fork-v$version-$sha"
-          $notes = "Unsigned Windows build of qiulinfan/zed stable at $env:GITHUB_SHA (Zed $version)."
-          gh release create $tag target/Zed-x86_64.exe "target/zed-remote-server-windows-x86_64.zip" `
+          $notes = "Unsigned Windows build of qiulinfan/zed stable at $env:GITHUB_SHA (Zed $version). Zed-x86_64.zip is the install layout that update-forks puts in place; Zed-x86_64.exe is the installer."
+          gh release create $tag target/Zed-x86_64.zip target/Zed-x86_64.exe "target/zed-remote-server-windows-x86_64.zip" `
             --target $env:GITHUB_SHA --title "Zed $version (fork, $sha)" --notes $notes --latest
 
       - name: Keep the installer as a run artifact
@@ -69,6 +81,7 @@ jobs:
         with:
           name: zed-windows-x86_64
           path: |
+            target/Zed-x86_64.zip
             target/Zed-x86_64.exe
             target/zed-remote-server-windows-x86_64.zip
           if-no-files-found: ignore
