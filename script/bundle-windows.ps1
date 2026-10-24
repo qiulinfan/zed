@@ -40,8 +40,18 @@ function Get-VSArch {
     }
 }
 
+# Find any Visual Studio 2022 edition with the C++ tools and Spectre-mitigated libs, so the same
+# script runs on a Community install and on GitHub's runners (Enterprise).
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+$vsPath = & $vswhere -products * -version "[17.0,18.0)" `
+    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre `
+    -latest -property installationPath
+if (-not $vsPath) {
+    throw "No Visual Studio 2022 with the C++ x64/x86 tools and Spectre-mitigated libs was found"
+}
+
 Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+& "$vsPath\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
 Pop-Location
 
 $target = "$Architecture-pc-windows-msvc"

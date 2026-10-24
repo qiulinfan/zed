@@ -25,6 +25,12 @@
 .wrangler
 .perf-runs
 /assets/*licenses.*
+# Windows bundle intermediates (script/bundle-windows.ps1)
+/inno/
+/conpty/
+/AGS_SDK-*/
+/AGS_SDK_v*.zip
+/Microsoft.Windows.Console.ConPTY.*.nupkg
 /crates/collab/seed.json
 /crates/theme/schemas/theme.json
 /crates/zed/resources/flatpak/flatpak-cargo-sources.json

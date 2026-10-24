@@ -1,0 +1,75 @@
+# Builds this fork's unsigned Windows installer and publishes it as a GitHub Release, so a
+# Windows machine installs the fork by downloading Zed-x86_64.exe instead of compiling it.
+# Every upstream workflow is removed from this fork; this is the only one.
+name: Fork Windows bundle
+
+on:
+  push:
+    branches:
+      - stable
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-windows-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    # windows-2022 ships Visual Studio 2022 with the Spectre-mitigated libs and Inno Setup 6,
+    # which script/bundle-windows.ps1 expects.
+    runs-on: windows-2022
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Put the target directory on the larger drive
+        shell: pwsh
+        run: |
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='FreeGB';e={[int]($_.Free/1GB)}}
+          $drive = (Get-PSDrive -PSProvider FileSystem | Sort-Object Free -Descending | Select-Object -First 1).Root
+          $target = Join-Path $drive 'zed-target'
+          New-Item -ItemType Directory -Force $target | Out-Null
+          if ((Resolve-Path .).Path.Substring(0, 3) -ne $drive) {
+            New-Item -ItemType Junction -Path target -Target $target | Out-Null
+          }
+          Write-Output "target -> $target"
+
+      - name: Check build prerequisites
+        shell: pwsh
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "Inno Setup 6 is missing: $iscc" }
+          rustup show active-toolchain
+
+      - name: Bundle
+        shell: pwsh
+        run: ./script/bundle-windows.ps1
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content crates/zed/Cargo.toml | Select-String '^version = "(.+)"').Matches[0].Groups[1].Value
+          $sha = $env:GITHUB_SHA.Substring(0, 10)
+          $tag = "fork-v$version-$sha"
+          $notes = "Unsigned Windows build of qiulinfan/zed stable at $env:GITHUB_SHA (Zed $version)."
+          gh release create $tag target/Zed-x86_64.exe "target/zed-remote-server-windows-x86_64.zip" `
+            --target $env:GITHUB_SHA --title "Zed $version (fork, $sha)" --notes $notes --latest
+
+      - name: Keep the installer as a run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-windows-x86_64
+          path: |
+            target/Zed-x86_64.exe
+            target/zed-remote-server-windows-x86_64.zip
+          if-no-files-found: ignore
+          retention-days: 14
