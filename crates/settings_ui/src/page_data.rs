@@ -1655,8 +1655,68 @@ fn appearance_page() -> SettingsPage {
         ]
     }
 
+    fn background_image_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SectionHeader("Background Image"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Image Path",
+                description: "Image drawn over the whole window. A leading `~/` expands to the home directory; leave empty for no image.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("background_image.path"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workspace
+                            .background_image
+                            .as_ref()?
+                            .path
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workspace
+                            .background_image
+                            .get_or_insert_default()
+                            .path = value.filter(|path| !path.is_empty());
+                    },
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    placeholder: Some("~/Pictures/wallpaper.jpg"),
+                    ..Default::default()
+                })),
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Image Opacity",
+                description: "How strongly the background image shows (0.0 - 1.0).",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("background_image.opacity"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workspace
+                            .background_image
+                            .as_ref()?
+                            .opacity
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workspace
+                            .background_image
+                            .get_or_insert_default()
+                            .opacity = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     let items: Box<[SettingsPageItem]> = concat_sections!(
         theme_section(),
+        background_image_section(),
         buffer_font_section(),
         ui_font_section(),
         agent_panel_font_section(),

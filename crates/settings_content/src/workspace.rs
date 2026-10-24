@@ -1,4 +1,4 @@
-use std::num::NonZeroUsize;
+use std::{fmt::Display, num::NonZeroUsize};
 
 use collections::HashMap;
 use schemars::JsonSchema;
@@ -7,7 +7,8 @@ use settings_macros::{MergeFrom, with_fallible_options};
 
 use crate::{
     CenteredPaddingSettings, CommandAliasTarget, DelayMs, DockPosition, DockSide, InactiveOpacity,
-    ShowIndentGuides, ShowScrollbar, serialize_optional_f32_with_two_decimal_places,
+    ShowIndentGuides, ShowScrollbar, serialize_f32_with_two_decimal_places,
+    serialize_optional_f32_with_two_decimal_places,
 };
 
 #[with_fallible_options]
@@ -710,7 +711,39 @@ pub struct BackgroundImageContent {
     /// How strongly the image shows, from 0 (invisible) to 1 (opaque).
     ///
     /// Default: 0.15
-    pub opacity: Option<f32>,
+    pub opacity: Option<BackgroundOpacity>,
+}
+
+/// Opacity of the window background image. 0 means invisible, 1 means opaque.
+///
+/// Valid range: 0.0 to 1.0
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    PartialOrd,
+    derive_more::FromStr,
+)]
+#[serde(transparent)]
+pub struct BackgroundOpacity(
+    #[serde(serialize_with = "serialize_f32_with_two_decimal_places")] pub f32,
+);
+
+impl Display for BackgroundOpacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:.2}", self.0)
+    }
+}
+
+impl From<f32> for BackgroundOpacity {
+    fn from(x: f32) -> Self {
+        Self(x)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Default)]

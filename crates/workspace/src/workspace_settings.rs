@@ -164,7 +164,7 @@ impl Settings for WorkspaceSettings {
                 };
                 Some(BackgroundImage {
                     path,
-                    opacity: image.opacity.unwrap_or(0.15).clamp(0., 1.),
+                    opacity: image.opacity.map_or(0.15, |opacity| opacity.0).clamp(0., 1.),
                 })
             }),
             window_decorations: workspace.window_decorations.unwrap(),
