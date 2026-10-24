@@ -1,4 +1,4 @@
-use std::{num::NonZeroUsize, time::Duration};
+use std::{num::NonZeroUsize, path::PathBuf, time::Duration};
 
 use crate::DockPosition;
 use collections::HashMap;
@@ -44,6 +44,7 @@ pub struct WorkspaceSettings {
     pub use_system_window_tabs: bool,
     pub fullscreen_mode: settings::FullscreenMode,
     pub zoomed_padding: bool,
+    pub background_image: Option<BackgroundImage>,
     pub window_decorations: settings::WindowDecorations,
     pub focus_follows_mouse: FocusFollowsMouse,
 }
@@ -91,6 +92,12 @@ pub struct TabBarSettings {
     pub show_nav_history_buttons: bool,
     pub show_tab_bar_buttons: bool,
     pub show_pinned_tabs_in_separate_row: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundImage {
+    pub path: PathBuf,
+    pub opacity: f32,
 }
 
 impl Settings for WorkspaceSettings {
@@ -149,6 +156,17 @@ impl Settings for WorkspaceSettings {
             use_system_window_tabs: workspace.use_system_window_tabs.unwrap(),
             fullscreen_mode: workspace.fullscreen_mode.unwrap(),
             zoomed_padding: workspace.zoomed_padding.unwrap(),
+            background_image: workspace.background_image.as_ref().and_then(|image| {
+                let path = image.path.as_deref().filter(|path| !path.is_empty())?;
+                let path = match path.strip_prefix("~/") {
+                    Some(rest) => util::paths::home_dir().join(rest),
+                    None => PathBuf::from(path),
+                };
+                Some(BackgroundImage {
+                    path,
+                    opacity: image.opacity.unwrap_or(0.15).clamp(0., 1.),
+                })
+            }),
             window_decorations: workspace.window_decorations.unwrap(),
             focus_follows_mouse: FocusFollowsMouse {
                 enabled: workspace

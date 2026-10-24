@@ -64,10 +64,11 @@ use gpui::{
     Action, AnyEntity, AnyView, AnyWeakView, App, AppContext, AsyncApp, AsyncWindowContext, Axis,
     Bounds, ClipboardItem, Context, CursorStyle, Decorations, DragMoveEvent, Entity, EntityId,
     EventEmitter, FocusHandle, Focusable, Global, HitboxBehavior, Hsla, KeyContext, Keystroke,
-    ManagedView, MouseButton, PathPromptOptions, Point, PromptLevel, Render, ResizeEdge, Size,
+    ManagedView, MouseButton, ObjectFit, PathPromptOptions, Point, PromptLevel, Render, ResizeEdge,
+    Size,
     Stateful, Subscription, SystemWindowTabController, Task, TaskExt, Tiling, WeakEntity,
-    WindowBounds, WindowHandle, WindowId, WindowOptions, actions, canvas, point, relative, size,
-    transparent_black,
+    WindowBounds, WindowHandle, WindowId, WindowOptions, actions, canvas, img, point, relative,
+    size, transparent_black,
 };
 pub use history_manager::*;
 pub use item::{
@@ -10064,6 +10065,20 @@ impl Render for Workspace {
                         parent.child(self.status_bar.clone())
                     })
                     .child(self.toast_layer.clone()),
+            )
+            // Drawn last so it tints the whole window; it has no listeners, so
+            // input still reaches the UI underneath.
+            .when_some(
+                WorkspaceSettings::get_global(cx).background_image.clone(),
+                |this, image| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .opacity(image.opacity)
+                            .child(img(image.path).size_full().object_fit(ObjectFit::Cover)),
+                    )
+                },
             )
     }
 }

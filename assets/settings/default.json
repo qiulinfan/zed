@@ -246,6 +246,11 @@
   //
   // Default: true
   "zoomed_padding": true,
+  // An image drawn over the whole window at low opacity. It never takes input.
+  // "path" accepts a leading "~/"; "opacity" ranges from 0 to 1 (default 0.15).
+  //
+  //     "background_image": { "path": "~/Pictures/wallpaper.jpg", "opacity": 0.15 },
+  "background_image": null,
   // Window title template.
   // Available variables are ${projectName}, ${fileName}, ${filePath},
   // ${relativePath}, ${fileStem}, ${remoteName}, ${remoteHost},

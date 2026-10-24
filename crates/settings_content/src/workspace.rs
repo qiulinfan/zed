@@ -139,6 +139,11 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: true
     pub zoomed_padding: Option<bool>,
+    /// An image drawn over the whole window at low opacity. It never takes
+    /// mouse or keyboard input.
+    ///
+    /// Default: null
+    pub background_image: Option<BackgroundImageContent>,
     /// Whether invoking a panel's `ToggleFocus` action while the panel is
     /// already focused closes the panel, instead of just moving focus back
     /// to the editor. This only applies to a panel's focus-toggle action, not
@@ -695,6 +700,17 @@ pub enum PaneSplitDirectionHorizontal {
 pub enum PaneSplitDirectionVertical {
     Left,
     Right,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct BackgroundImageContent {
+    /// Path to the image file. A leading `~/` expands to the home directory.
+    pub path: Option<String>,
+    /// How strongly the image shows, from 0 (invisible) to 1 (opaque).
+    ///
+    /// Default: 0.15
+    pub opacity: Option<f32>,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Default)]
