@@ -815,6 +815,8 @@ fn client_capabilities_for_agent(agent_id: &AgentId) -> acp::ClientCapabilities 
         .notices(acp::NoticeCapabilities::new());
 
     acp::ClientCapabilities::new()
+        // Draft subagents RFD: agents send each subagent as a child session.
+        .subagents(acp::SubagentCapabilities::new())
         .fs(acp::FileSystemCapabilities::new()
             .read_text_file(true)
             .write_text_file(true))
@@ -7736,6 +7738,102 @@ exit 7
     }
 
     #[gpui::test]
+    async fn subagent_child_sessions_become_threads_owned_by_their_parent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (agent_sender, agent_receiver) = futures::channel::oneshot::channel();
+        let (connection, project, _, _, _, _, _keep_agent_alive) =
+            connect_fake_agent_with_handle(None, Some(agent_sender), cx).await;
+        let agent = agent_receiver.await.expect("fake agent handle");
+        let parent_id = acp_v2::SessionId::new("parent-session");
+        let parent = cx
+            .update(|cx| {
+                connection.clone().load_session(
+                    parent_id.clone(),
+                    project,
+                    PathList::new(&[std::path::Path::new("/a")]),
+                    None,
+                    cx,
+                )
+            })
+            .await
+            .expect("load parent session");
+        // The Claude ACP adapter's draft-RFD form: the launching tool call, the
+        // child's announcement, the prompt as a session message seen from both
+        // sides, then the child's own reply under the child's session id.
+        let send = |session: &str, update: serde_json::Value| {
+            let update: acp::SessionUpdate =
+                serde_json::from_value(update).expect("session update");
+            agent
+                .send_notification(acp::SessionNotification::new(
+                    acp::SessionId::new(session),
+                    update,
+                ))
+                .expect("send notification");
+        };
+        let prompt = serde_json::json!({"sessionUpdate": "session_message", "messageId": "call-1",
+            "senderSessionId": "parent-session", "recipientSessionId": "child-1",
+            "content": [{"type": "text", "text": "find the TODOs"}]});
+        send(
+            "parent-session",
+            serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "call-1",
+                "title": "Explore the repo", "kind": "think", "status": "in_progress"}),
+        );
+        send(
+            "parent-session",
+            serde_json::json!({"sessionUpdate": "subagent_update", "sessionId": "child-1",
+                "title": "Scout", "state": {"state": "running"}}),
+        );
+        send("parent-session", prompt.clone());
+        send("child-1", prompt);
+        send(
+            "child-1",
+            serde_json::json!({"sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Found 3 TODOs"}}),
+        );
+        cx.run_until_parked();
+
+        let child_id = acp_v2::SessionId::new("child-1");
+        let child = parent
+            .read_with(cx, |parent, _| parent.subagent_thread(&child_id))
+            .expect("parent adopted the child session");
+        child.read_with(cx, |child, cx| {
+            assert_eq!(child.parent_session_id(), Some(&parent_id));
+            let [
+                acp_thread::AgentThreadEntry::UserMessage(prompt),
+                acp_thread::AgentThreadEntry::AssistantMessage(reply),
+            ] = child.entries()
+            else {
+                panic!("the child's prompt and reply, got {} entries", child.entries().len());
+            };
+            let expected: Vec<acp_v2::ContentBlock> = vec!["find the TODOs".into()];
+            assert_eq!(prompt.content.source_blocks(), expected);
+            assert!(matches!(
+                reply.chunks.as_slice(),
+                [acp_thread::AssistantMessageChunk::Message { block, .. }] if block.to_markdown(cx) == "Found 3 TODOs"
+            ));
+        });
+        parent.read_with(cx, |parent, _| {
+            let (_, call) = parent
+                .tool_call(&acp_v2::ToolCallId::new("call-1"))
+                .expect("launching tool call");
+            assert_eq!(
+                call.subagent_session_info
+                    .as_ref()
+                    .map(|info| &info.session_id),
+                Some(&child_id)
+            );
+            // The child's traffic stays out of the parent's own transcript.
+            assert!(
+                parent.entries().iter().all(|entry| !matches!(
+                    entry,
+                    acp_thread::AgentThreadEntry::AssistantMessage(_)
+                ))
+            );
+        });
+    }
+
+    #[gpui::test]
     async fn eof_cancels_elicitations_for_retained_idle_owners(cx: &mut gpui::TestAppContext) {
         let (agent_sender, agent_receiver) = futures::channel::oneshot::channel();
         let (connection, project, _, _, _, _, keep_agent_alive) =
@@ -10046,9 +10144,21 @@ fn handle_session_notification(
     }
 
     // Abandoned loads can keep replaying until their wire operation settles.
-    let Some(_thread) = thread.upgrade() else {
+    let Some(thread_entity) = thread.upgrade() else {
         return;
     };
+
+    match &notification.update {
+        acp::SessionUpdate::SubagentUpdate(update) => {
+            handle_subagent_update(&thread_entity, update, cx, ctx);
+            return;
+        }
+        acp::SessionUpdate::SessionMessage(message) => {
+            handle_session_message(&session_id, &thread_entity, message, cx);
+            return;
+        }
+        _ => {}
+    }
 
     // Pre-handle: if a ToolCall carries terminal_info, create/register a display-only terminal.
     if let acp::SessionUpdate::ToolCall(tc) = &notification.update {
@@ -10150,6 +10260,86 @@ fn handle_session_notification(
                         .log_err();
                 }
             }
+        }
+    }
+}
+
+/// Draft subagents RFD: `subagent_update` on a parent announces (or updates) a
+/// child session whose own updates then arrive under the child's id. The child
+/// gets a thread its parent owns and an entry in the session map, so its
+/// traffic is routed instead of dropped as an unknown session.
+fn handle_subagent_update(
+    parent: &Entity<AcpThread>,
+    update: &acp::SubagentUpdate,
+    cx: &mut AsyncApp,
+    ctx: &ClientContext,
+) {
+    let child_id = acp_v2::SessionId::new(update.session_id.0.clone());
+    let title = match &update.title {
+        agent_client_protocol::schema::MaybeUndefined::Value(title) => {
+            Some(SharedString::from(title.clone()))
+        }
+        _ => None,
+    };
+    let existing = ctx
+        .sessions
+        .borrow()
+        .get(&child_id)
+        .and_then(|session| session.thread.upgrade());
+    if let Some(child) = existing {
+        if let Some(title) = title {
+            child.update(cx, |child, cx| child.set_provisional_title(title, cx));
+        }
+        return;
+    }
+    let child = parent.update(cx, |parent, cx| {
+        parent.new_subagent_thread(child_id.clone(), title, cx)
+    });
+    ctx.sessions.borrow_mut().insert(
+        child_id,
+        AcpSession {
+            thread: child.downgrade(),
+            suppress_abort_err: false,
+            session_modes: None,
+            config_options: None,
+            default_config_task: None,
+            // The parent owns the child thread; the entry goes with the connection.
+            _release_subscription: Subscription::new(|| {}),
+        },
+    );
+    parent.update(cx, |parent, cx| parent.adopt_subagent_thread(child, cx));
+}
+
+/// Draft subagents RFD: a message between a parent and a child session. On the
+/// sender's side its id is the tool call that launched the child, which then
+/// draws as that child's subagent card; on the recipient's side its content is
+/// the prompt the child received, shown as the child's user message.
+fn handle_session_message(
+    session_id: &acp_v2::SessionId,
+    thread: &Entity<AcpThread>,
+    message: &acp::SessionMessage,
+    cx: &mut AsyncApp,
+) {
+    let Some(recipient) = message.recipient_session_id.as_ref() else {
+        return;
+    };
+    let recipient = acp_v2::SessionId::new(recipient.0.clone());
+    if &recipient != session_id {
+        let tool_call_id = acp_v2::ToolCallId::new(message.message_id.0.clone());
+        thread.update(cx, |thread, cx| {
+            if thread.subagent_thread(&recipient).is_some() {
+                thread.link_subagent_tool_call(&tool_call_id, recipient, cx);
+            }
+        });
+        return;
+    }
+    let agent_client_protocol::schema::MaybeUndefined::Value(content) = &message.content else {
+        return;
+    };
+    for block in content {
+        let chunk = acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(block.clone()));
+        if let Err(err) = thread.update(cx, |thread, cx| thread.handle_session_update(chunk, cx)) {
+            log::error!("Failed to show a subagent prompt for {session_id:?}: {err:?}");
         }
     }
 }

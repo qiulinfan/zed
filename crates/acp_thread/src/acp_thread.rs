@@ -3453,6 +3453,10 @@ pub struct AcpThread {
     /// reveal text gradually without changing the authoritative message.
     streaming_text_buffer: Option<StreamingTextBuffer>,
     idle_sleep_prevention: IdleSleepPrevention,
+    /// Child sessions an external agent announced on this thread (draft ACP
+    /// subagents RFD). The parent owns their threads; views find them through
+    /// `SubagentSpawned`, as they do for the native agent's subagents.
+    subagent_threads: HashMap<acp_v2::SessionId, Entity<AcpThread>>,
 }
 
 enum IdleSleepPrevention {
@@ -3789,6 +3793,7 @@ impl AcpThread {
             ui_scroll_position: None,
             streaming_text_buffer: None,
             idle_sleep_prevention: IdleSleepPrevention::Inactive,
+            subagent_threads: HashMap::default(),
         }
     }
 
@@ -5294,6 +5299,76 @@ impl AcpThread {
 
     pub fn subagent_spawned(&mut self, session_id: acp_v2::SessionId, cx: &mut Context<Self>) {
         cx.emit(AcpThreadEvent::SubagentSpawned(session_id));
+    }
+
+    /// A thread for child session `session_id` of this one, on the same
+    /// connection, project and folders, ready for `adopt_subagent_thread`.
+    pub fn new_subagent_thread(
+        &self,
+        session_id: acp_v2::SessionId,
+        title: Option<SharedString>,
+        cx: &mut App,
+    ) -> Entity<AcpThread> {
+        let connection = self.connection.clone();
+        let project = self.project.clone();
+        let work_dirs = self.work_dirs().cloned();
+        let prompt_capabilities = self.prompt_capabilities.clone();
+        let parent_session_id = self.session_id().clone();
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        cx.new(|cx| {
+            AcpThread::new(
+                Some(parent_session_id),
+                title,
+                work_dirs,
+                connection,
+                project,
+                action_log,
+                session_id,
+                watch::Receiver::constant(prompt_capabilities),
+                cx,
+            )
+        })
+    }
+
+    /// Takes ownership of a child session's thread and announces it to views.
+    pub fn adopt_subagent_thread(&mut self, child: Entity<AcpThread>, cx: &mut Context<Self>) {
+        let session_id = child.read(cx).session_id().clone();
+        if self
+            .subagent_threads
+            .insert(session_id.clone(), child)
+            .is_none()
+        {
+            cx.emit(AcpThreadEvent::SubagentSpawned(session_id));
+        }
+    }
+
+    /// The thread of a child session this thread adopted.
+    pub fn subagent_thread(&self, session_id: &acp_v2::SessionId) -> Option<Entity<AcpThread>> {
+        self.subagent_threads.get(session_id).cloned()
+    }
+
+    /// Draws tool call `id` as the launch of child session `session_id` (the
+    /// subagent card). False when there is no such call or it already names a
+    /// child.
+    pub fn link_subagent_tool_call(
+        &mut self,
+        id: &acp_v2::ToolCallId,
+        session_id: acp_v2::SessionId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((index, call)) = self.tool_call_mut(id) else {
+            return false;
+        };
+        if call.subagent_session_info.is_some() {
+            return false;
+        }
+        call.subagent_session_info = Some(SubagentSessionInfo {
+            session_id,
+            message_start_index: 0,
+            message_end_index: None,
+        });
+        cx.emit(AcpThreadEvent::EntryUpdated(index));
+        true
     }
 
     pub fn update_token_usage(&mut self, usage: Option<TokenUsage>, cx: &mut Context<Self>) {

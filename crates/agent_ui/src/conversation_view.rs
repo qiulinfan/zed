@@ -2381,14 +2381,33 @@ impl ConversationView {
         let Some(connected) = self.as_connected() else {
             return;
         };
-        if connected.threads.contains_key(&subagent_id)
-            || !connected.connection.supports_load_session()
-        {
+        if connected.threads.contains_key(&subagent_id) {
             return;
         }
         let Some(parent_thread) = connected.threads.get(&parent_session_id) else {
             return;
         };
+        // An external agent's child session (draft ACP subagents RFD) already has
+        // a thread its parent owns: show it without asking the agent to load it.
+        let adopted = parent_thread
+            .read(cx)
+            .thread
+            .read(cx)
+            .subagent_thread(&subagent_id);
+        if let Some(subagent_thread) = adopted {
+            let conversation = connected.conversation.clone();
+            conversation.update(cx, |conversation, cx| {
+                conversation.register_thread(subagent_thread.clone(), cx);
+            });
+            let view = self.new_thread_view(subagent_thread, conversation, false, None, window, cx);
+            if let Some(connected) = self.as_connected_mut() {
+                connected.threads.insert(subagent_id, view);
+            }
+            return;
+        }
+        if !connected.connection.supports_load_session() {
+            return;
+        }
         let work_dirs = parent_thread
             .read(cx)
             .thread
@@ -5797,6 +5816,33 @@ pub(crate) mod tests {
             assert!(view.activation_focus_handle(cx).is_focused(window));
             assert_eq!(view.list_state.item_count(), 0);
             assert!(view.thread.read(cx).notices().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_adopted_subagent_thread_gets_a_view_without_a_session_load(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        // This agent cannot load sessions. An external agent's child session
+        // (draft ACP subagents RFD) arrives with a thread its parent owns, so it
+        // must not need one.
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+        add_to_workspace_with_size(conversation_view.clone(), true, cx);
+        let root_thread =
+            active_thread(&conversation_view, cx).read_with(cx, |view, _| view.thread.clone());
+        let child_id = acp_v2::SessionId::new("child-1");
+        let child = root_thread.update(cx, |root, cx| {
+            root.new_subagent_thread(child_id.clone(), Some("Scout".into()), cx)
+        });
+        root_thread.update(cx, |root, cx| root.adopt_subagent_thread(child, cx));
+        cx.run_until_parked();
+
+        conversation_view.read_with(cx, |view, _| {
+            assert!(view.thread_view(&child_id).is_some());
         });
     }
 
