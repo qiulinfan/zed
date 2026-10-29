@@ -1,8 +1,8 @@
 use crate::{
-    Copy, CopyAndTrim, CopyPermalinkToLine, Cut, DisplayPoint, DisplaySnapshot, Editor,
-    EvaluateSelectedText, FindAllReferences, GoToDeclaration, GoToDefinition, GoToImplementation,
-    GoToTypeDefinition, Paste, Rename, RevealInFileManager, RunToCursor, SelectMode,
-    SelectionEffects, SelectionExt, ToDisplayPoint, ToggleCodeActions,
+    Copy, CopyAndTrim, CopyLocation, CopyPermalinkToLine, Cut, DisplayPoint, DisplaySnapshot,
+    Editor, EvaluateSelectedText, FindAllReferences, GoToDeclaration, GoToDefinition,
+    GoToImplementation, GoToTypeDefinition, Paste, Rename, RevealInFileManager, RunToCursor,
+    SelectMode, SelectionEffects, SelectionExt, ToDisplayPoint, ToggleCodeActions,
     actions::{Format, FormatSelections},
     selections_collection::SelectionsCollection,
 };
@@ -200,6 +200,7 @@ pub fn deploy_context_menu(
 
         let focus = window.focused(cx);
         let has_reveal_target = editor.target_file(cx).is_some();
+        let has_copy_location_target = editor.target_file_abs_path(cx).is_some();
         let has_selections = editor
             .selections
             .all::<PointUtf16>(&display_map)
@@ -297,6 +298,11 @@ pub fn deploy_context_menu(
                 .separator()
                 .action("Cut", Box::new(Cut))
                 .action("Copy", Box::new(Copy))
+                .action_disabled_when(
+                    !has_copy_location_target,
+                    "Copy Location",
+                    Box::new(CopyLocation),
+                )
                 .action("Copy and Trim", Box::new(CopyAndTrim))
                 .action("Paste", Box::new(Paste))
                 .separator()

@@ -630,6 +630,7 @@ impl EditorElement {
         register_action(editor, window, Editor::copy_permalink_to_line);
         register_action(editor, window, Editor::open_permalink_to_line);
         register_action(editor, window, Editor::copy_file_location);
+        register_action(editor, window, Editor::copy_location);
         register_action(editor, window, Editor::toggle_git_blame);
         register_action(editor, window, Editor::toggle_git_blame_inline);
         if editor.read(cx).blame().is_some() {

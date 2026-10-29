@@ -499,6 +499,8 @@ actions!(
         CopyAndTrim,
         /// Copies the current file location to the clipboard.
         CopyFileLocation,
+        /// Copies the absolute path, cursor line and column, and nearby text.
+        CopyLocation,
         /// Copies the highlighted text as JSON.
         CopyHighlightJson,
         /// Copies the current file name to the clipboard.

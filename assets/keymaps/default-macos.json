@@ -636,6 +636,7 @@
       "cmd-.": "editor::ToggleCodeActions",
       "cmd-k r": "editor::RevealInFileManager",
       "cmd-k p": "editor::CopyPath",
+      "cmd-shift-c": "editor::CopyLocation",
       "cmd-\\": "pane::SplitRight",
     },
   },

@@ -11656,6 +11656,49 @@ async fn test_copy_file_location_in_singleton_buffer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_copy_location(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/root"),
+        json!({ "location.txt": "before\n中文😀text\nafter" }),
+    )
+    .await;
+    let project = Project::test(fs, [path!("/root").as_ref()], cx).await;
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer(path!("/root/location.txt"), cx)
+        })
+        .await
+        .unwrap();
+    let multibuffer = cx.new(|cx| MultiBuffer::singleton(buffer.clone(), cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        build_editor_with_project(project.clone(), multibuffer, window, cx)
+    });
+    editor.update_in(cx, |editor, window, cx| {
+        editor.change_selections(Default::default(), window, cx, |selections| {
+            selections.select_ranges([Point::new(1, 10)..Point::new(1, 10)]);
+        });
+        editor.copy_location(&CopyLocation, window, cx);
+    });
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some(format!(
+            "{}:2:5\n\n  1 | before\n> 2 | 中文😀text\n  3 | after",
+            path!("/root/location.txt")
+        ))
+    );
+    buffer.update(cx, |buffer, cx| buffer.set_text("", cx));
+    editor.update_in(cx, |editor, window, cx| {
+        editor.copy_location(&CopyLocation, window, cx);
+    });
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some(format!("{}:1:1\n\n> 1 | ", path!("/root/location.txt")))
+    );
+}
+
+#[gpui::test]
 async fn test_paste_multiline(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 

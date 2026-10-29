@@ -594,6 +594,7 @@
       "ctrl-.": "editor::ToggleCodeActions",
       "ctrl-k r": "editor::RevealInFileManager",
       "ctrl-k p": "editor::CopyPath",
+      "ctrl-shift-c": "editor::CopyLocation",
       "ctrl-\\": "pane::SplitRight",
       "ctrl-alt-shift-c": "editor::DisplayCursorNames",
       "alt-.": "editor::GoToHunk",

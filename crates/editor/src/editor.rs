@@ -9182,6 +9182,32 @@ impl Editor {
         }
     }
 
+    pub fn copy_location(&mut self, _: &CopyLocation, _: &mut Window, cx: &mut Context<Self>) {
+        let selection = self.selections.newest::<Point>(&self.display_snapshot(cx));
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let Some((buffer, point)) = snapshot.point_to_buffer_point(selection.head()) else {
+            return;
+        };
+        let Some(path) = self.target_file_abs_path(cx) else {
+            return;
+        };
+
+        let column = buffer.point_to_point_utf16(point).column + 1;
+        let first_row = point.row.saturating_sub(1);
+        let last_row = (point.row + 1).min(buffer.max_point().row);
+        let width = (last_row + 1).to_string().len();
+        let mut text = format!("{}:{}:{column}\n", path.display(), point.row + 1);
+        for row in first_row..=last_row {
+            let marker = if row == point.row { '>' } else { ' ' };
+            let line_number = row + 1;
+            text.push_str(&format!("\n{marker} {line_number:>width$} | "));
+            text.extend(
+                buffer.text_for_range(Point::new(row, 0)..Point::new(row, buffer.line_len(row))),
+            );
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
     pub fn insert_uuid_v4(
         &mut self,
         _: &InsertUuidV4,

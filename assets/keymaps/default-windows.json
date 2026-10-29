@@ -593,6 +593,7 @@
       "ctrl-.": "editor::ToggleCodeActions",
       "ctrl-k r": "editor::RevealInFileManager",
       "ctrl-k p": "editor::CopyPath",
+      "ctrl-shift-c": "editor::CopyLocation",
       "ctrl-\\": "pane::SplitRight",
       "alt-.": "editor::GoToHunk",
       "alt-,": "editor::GoToPreviousHunk",
