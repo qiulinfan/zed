@@ -30,6 +30,7 @@ pub mod terminal_thread_metadata_store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod thread_import;
+mod thread_sync;
 pub mod thread_metadata_store;
 pub mod thread_worktree_archive;
 

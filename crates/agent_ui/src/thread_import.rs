@@ -3,7 +3,7 @@ use std::time::Duration;
 use acp_thread::AgentSessionListRequest;
 use agent::ThreadStore;
 use agent_client_protocol::schema::v2 as acp;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use collections::{HashMap, HashSet};
 use db::kvp::Dismissable;
 use db::sqlez;
@@ -136,6 +136,9 @@ pub struct ThreadImportModal {
     sessions_by_agent: Vec<SessionByAgent>,
     selected_index: Option<usize>,
     is_fetching_sessions: bool,
+    /// When the sessions were listed: the import reaches [`crate::thread_sync::first_import_window`]
+    /// back from here, and later syncs pick up what changed after it.
+    fetch_started_at: DateTime<Utc>,
     is_importing: bool,
     last_error: Option<SharedString>,
 }
@@ -194,6 +197,7 @@ impl ThreadImportModal {
             sessions_by_agent: Vec::new(),
             selected_index: None,
             is_fetching_sessions: false,
+            fetch_started_at: Utc::now(),
             is_importing: false,
             last_error: None,
         };
@@ -227,6 +231,7 @@ impl ThreadImportModal {
         }
 
         self.is_fetching_sessions = true;
+        self.fetch_started_at = Utc::now();
         self.last_error = None;
         self.sessions_by_agent.clear();
         self.agent_import_statuses = self
@@ -241,9 +246,15 @@ impl ThreadImportModal {
             .filter_map(|metadata| metadata.session_id.clone())
             .collect();
 
+        let cutoff = self.fetch_started_at - crate::thread_sync::first_import_window();
         for agent_id in self.agent_ids() {
-            let task =
-                fetch_sessions_for_agent(agent_id, existing_sessions.clone(), stores.clone(), cx);
+            let task = fetch_sessions_for_agent(
+                agent_id,
+                existing_sessions.clone(),
+                stores.clone(),
+                cutoff,
+                cx,
+            );
             cx.spawn(async move |this, cx| {
                 let result = task.await;
                 this.update(cx, |this, cx| {
@@ -381,6 +392,18 @@ impl ThreadImportModal {
         let imported_count = threads.len();
 
         ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save_all(threads, cx));
+
+        // Every agent this import listed is kept in step from now on, even one that had no recent
+        // session to bring in.
+        for entry in &self.agent_entries {
+            let listed = matches!(
+                self.agent_import_statuses.get(&entry.agent_id),
+                Some(AgentImportStatus::Ready { .. })
+            );
+            if listed && !self.unchecked_agents.contains(&entry.agent_id) {
+                crate::thread_sync::write_synced_until(&entry.agent_id, self.fetch_started_at, cx);
+            }
+        }
 
         self.is_importing = false;
         self.show_imported_threads_toast(imported_count, cx);
@@ -573,7 +596,8 @@ impl Render for ThreadImportModal {
                             .headline("Import External Agent Threads")
                             .description(
                                 "Import threads from agents like Claude Agent, Codex, and more, whether started in Zed or another client. \
-                                Choose which agents to include, and their threads will appear in your thread history."
+                                Choose which agents to include: their threads of the last 10 days appear in your thread list, \
+                                and from then on Zed adds their new threads, and drops the ones the agent deleted, by itself."
                             )
                             .show_dismiss_button(true),
 
@@ -690,6 +714,7 @@ fn fetch_sessions_for_agent(
     agent_id: AgentId,
     existing_sessions: HashSet<acp::SessionId>,
     stores: Vec<Entity<AgentConnectionStore>>,
+    cutoff: DateTime<Utc>,
     cx: &mut App,
 ) -> Task<AgentSessionFetchResult> {
     let mut wait_for_connection_tasks = Vec::new();
@@ -747,8 +772,9 @@ fn fetch_sessions_for_agent(
         let mut sessions_by_agent = Vec::new();
         for (agent_id, result) in futures::future::join_all(page_tasks).await {
             match result {
-                Ok(sessions) => {
+                Ok(mut sessions) => {
                     stats.successful_attempt_count += 1;
+                    keep_sessions_since(&mut sessions, cutoff);
                     sessions_by_agent.push(sessions);
                 }
                 Err(error) => {
@@ -791,13 +817,14 @@ fn fetch_sessions_for_agent(
     })
 }
 
-async fn collect_all_sessions(
+pub(crate) async fn collect_all_sessions(
     agent_id: AgentId,
     remote_connection: Option<RemoteConnectionOptions>,
     list: std::rc::Rc<dyn acp_thread::AgentSessionList>,
     cx: &mut gpui::AsyncApp,
 ) -> anyhow::Result<SessionByAgent> {
     let mut sessions = Vec::new();
+    let mut archived_session_ids = HashSet::default();
     let mut cursor: Option<String> = None;
     loop {
         let request = AgentSessionListRequest {
@@ -806,6 +833,7 @@ async fn collect_all_sessions(
         };
         let task = cx.update(|cx| list.list_sessions(request, cx));
         let response = task.await?;
+        archived_session_ids.extend(archived_session_ids_of(response.meta.as_ref()));
         sessions.extend(response.sessions);
         match response.next_cursor {
             Some(next) if Some(&next) != cursor.as_ref() => cursor = Some(next),
@@ -816,14 +844,35 @@ async fn collect_all_sessions(
         agent_id,
         remote_connection,
         sessions,
+        archived_session_ids,
     })
 }
 
+/// The sessions an agent says it archived itself: omp names the ones `omp gc` moved out of its
+/// store in `_meta.archivedSessionIds`, as they are no longer in the list.
+fn archived_session_ids_of(meta: Option<&acp::Meta>) -> Vec<acp::SessionId> {
+    meta.and_then(|meta| meta.get("archivedSessionIds"))
+        .and_then(|ids| ids.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str())
+        .map(acp::SessionId::new)
+        .collect()
+}
+
+/// Drops the sessions with no activity since `cutoff`, and those that report no time at all.
+fn keep_sessions_since(sessions: &mut SessionByAgent, cutoff: DateTime<Utc>) {
+    sessions
+        .sessions
+        .retain(|session| session.updated_at.is_some_and(|updated_at| updated_at >= cutoff));
+}
+
 #[derive(Clone)]
-struct SessionByAgent {
-    agent_id: AgentId,
-    remote_connection: Option<RemoteConnectionOptions>,
-    sessions: Vec<acp_thread::AgentSessionInfo>,
+pub(crate) struct SessionByAgent {
+    pub(crate) agent_id: AgentId,
+    pub(crate) remote_connection: Option<RemoteConnectionOptions>,
+    pub(crate) sessions: Vec<acp_thread::AgentSessionInfo>,
+    pub(crate) archived_session_ids: HashSet<acp::SessionId>,
 }
 
 fn count_importable_threads_by_agent(
@@ -861,6 +910,7 @@ fn collect_importable_threads(
         agent_id,
         remote_connection,
         sessions,
+        ..
     } in sessions_by_agent
     {
         for session in sessions {
@@ -881,7 +931,9 @@ fn collect_importable_threads(
                 interacted_at: None,
                 worktree_paths: WorktreePaths::from_folder_paths(&folder_paths),
                 remote_connection: remote_connection.clone(),
-                archived: true,
+                // Imported threads belong in the list like any other: an archive in Zed only hides a
+                // thread, and the agent never learns of it.
+                archived: false,
             });
         }
     }
@@ -1011,6 +1063,50 @@ mod tests {
     }
 
     #[test]
+    fn test_first_import_keeps_only_sessions_active_since_the_cutoff() {
+        let cutoff = Utc::now() - chrono::TimeDelta::days(10);
+        let paths = PathList::new(&[Path::new("/project")]);
+        let mut sessions = SessionByAgent {
+            agent_id: AgentId::new("agent-a"),
+            remote_connection: None,
+            archived_session_ids: HashSet::default(),
+            sessions: vec![
+                make_session("recent", None, Some(paths.clone()), Some(Utc::now()), None),
+                make_session(
+                    "old",
+                    None,
+                    Some(paths.clone()),
+                    Some(cutoff - chrono::TimeDelta::hours(1)),
+                    None,
+                ),
+                make_session("undated", None, Some(paths), None, None),
+            ],
+        };
+
+        keep_sessions_since(&mut sessions, cutoff);
+
+        let ids: Vec<&str> = sessions
+            .sessions
+            .iter()
+            .map(|session| session.session_id.0.as_ref())
+            .collect();
+        assert_eq!(ids, ["recent"]);
+    }
+
+    #[test]
+    fn test_reads_the_sessions_omp_archived_from_the_list_meta() {
+        let meta: acp::Meta = serde_json::from_value(serde_json::json!({
+            "archivedSessionIds": ["a", "b"],
+        }))
+        .unwrap();
+
+        let ids = archived_session_ids_of(Some(&meta));
+
+        assert_eq!(ids, [acp::SessionId::new("a"), acp::SessionId::new("b")]);
+        assert!(archived_session_ids_of(None).is_empty());
+    }
+
+    #[test]
     fn test_collect_skips_sessions_already_in_existing_set() {
         let existing = HashSet::from_iter(vec![acp::SessionId::new("existing-1")]);
         let paths = PathList::new(&[Path::new("/project")]);
@@ -1018,6 +1114,7 @@ mod tests {
         let sessions_by_agent = vec![SessionByAgent {
             agent_id: AgentId::new("agent-a"),
             remote_connection: None,
+            archived_session_ids: HashSet::default(),
             sessions: vec![
                 make_session(
                     "existing-1",
@@ -1045,6 +1142,7 @@ mod tests {
         let sessions_by_agent = vec![SessionByAgent {
             agent_id: AgentId::new("agent-a"),
             remote_connection: None,
+            archived_session_ids: HashSet::default(),
             sessions: vec![
                 make_session("has-dirs", Some("With Dirs"), Some(paths), None, None),
                 make_session("no-dirs", Some("No Dirs"), None, None, None),
@@ -1061,13 +1159,14 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_marks_all_imported_threads_as_archived() {
+    fn test_collect_keeps_imported_threads_in_the_main_list() {
         let existing = HashSet::default();
         let paths = PathList::new(&[Path::new("/project")]);
 
         let sessions_by_agent = vec![SessionByAgent {
             agent_id: AgentId::new("agent-a"),
             remote_connection: None,
+            archived_session_ids: HashSet::default(),
             sessions: vec![
                 make_session("s1", Some("Thread 1"), Some(paths.clone()), None, None),
                 make_session("s2", Some("Thread 2"), Some(paths), None, None),
@@ -1077,7 +1176,7 @@ mod tests {
         let result = collect_importable_threads(sessions_by_agent, existing);
 
         assert_eq!(result.len(), 2);
-        assert!(result.iter().all(|t| t.archived));
+        assert!(result.iter().all(|t| !t.archived));
     }
 
     #[test]
@@ -1089,6 +1188,7 @@ mod tests {
             SessionByAgent {
                 agent_id: AgentId::new("agent-a"),
                 remote_connection: None,
+                archived_session_ids: HashSet::default(),
                 sessions: vec![make_session(
                     "s1",
                     Some("From A"),
@@ -1100,6 +1200,7 @@ mod tests {
             SessionByAgent {
                 agent_id: AgentId::new("agent-b"),
                 remote_connection: None,
+                archived_session_ids: HashSet::default(),
                 sessions: vec![make_session("s2", Some("From B"), Some(paths), None, None)],
             },
         ];
@@ -1128,6 +1229,7 @@ mod tests {
             SessionByAgent {
                 agent_id: AgentId::new("agent-a"),
                 remote_connection: None,
+                archived_session_ids: HashSet::default(),
                 sessions: vec![make_session(
                     "shared-session",
                     Some("From A"),
@@ -1139,6 +1241,7 @@ mod tests {
             SessionByAgent {
                 agent_id: AgentId::new("agent-b"),
                 remote_connection: None,
+                archived_session_ids: HashSet::default(),
                 sessions: vec![make_session(
                     "shared-session",
                     Some("From B"),
@@ -1172,6 +1275,7 @@ mod tests {
         let sessions_by_agent = vec![SessionByAgent {
             agent_id: AgentId::new("agent-a"),
             remote_connection: None,
+            archived_session_ids: HashSet::default(),
             sessions: vec![
                 make_session("s1", Some("T1"), Some(paths.clone()), None, None),
                 make_session("s2", Some("T2"), Some(paths), None, None),
@@ -1190,6 +1294,7 @@ mod tests {
             SessionByAgent {
                 agent_id: AgentId::new("agent-a"),
                 remote_connection: None,
+                archived_session_ids: HashSet::default(),
                 sessions: vec![
                     make_session(
                         "existing",
@@ -1205,6 +1310,7 @@ mod tests {
             SessionByAgent {
                 agent_id: AgentId::new("agent-b"),
                 remote_connection: None,
+                archived_session_ids: HashSet::default(),
                 sessions: vec![make_session(
                     "shared",
                     Some("Shared B"),

@@ -1166,6 +1166,11 @@ impl AcpConnection {
         )
     }
 
+    /// Whether a thread of this connection holds the session now.
+    pub fn has_loaded_session(&self, session_id: &acp_v2::SessionId) -> bool {
+        self.sessions.borrow().contains_key(session_id)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn new_for_test(
         connection: ConnectionTo<Agent>,

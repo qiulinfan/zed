@@ -1139,6 +1139,7 @@ pub struct AgentPanel {
     zoomed: bool,
     pending_serialization: Option<Task<Result<()>>>,
     persist_selected_agent_task: Task<()>,
+    _external_thread_sync: Task<()>,
     new_user_onboarding: Entity<AgentPanelOnboarding>,
     new_user_onboarding_upsell_dismissed: AtomicBool,
     selected_agent: Agent,
@@ -1501,6 +1502,7 @@ impl AgentPanel {
         });
 
         let connection_store = cx.new(|cx| AgentConnectionStore::new(project.clone(), cx));
+        let _external_thread_sync = crate::thread_sync::run(connection_store.downgrade(), cx);
         let _project_subscription =
             cx.subscribe(&project, |this, _project, event, cx| match event {
                 project::Event::WorktreeAdded(_)
@@ -1548,6 +1550,7 @@ impl AgentPanel {
             context_server_registry,
             draft_thread: None,
             persist_selected_agent_task: Task::ready(()),
+            _external_thread_sync,
             retained_threads: HashMap::default(),
             terminals: HashMap::default(),
             pending_terminal_spawn: None,
