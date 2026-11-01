@@ -1,8 +1,8 @@
+#[cfg(test)]
+use std::sync::LazyLock;
 use std::{
-    ffi::{OsStr, OsString},
-    os::windows::ffi::OsStrExt,
-    path::Path,
-    sync::LazyLock,
+    ffi::OsString,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -10,10 +10,6 @@ use anyhow::{Context as _, Result};
 use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
-        System::RestartManager::{
-            CCH_RM_SESSION_KEY, RmEndSession, RmGetList, RmRegisterResources, RmShutdown,
-            RmStartSession,
-        },
         UI::WindowsAndMessaging::PostMessageW,
     },
     core::{PCWSTR, PWSTR},
@@ -42,6 +38,7 @@ impl Job {
         }
     }
 
+    #[cfg(test)]
     pub fn mkdir_if_exists(name: &'static Path, check: &'static Path) -> Self {
         Job {
             apply: Box::new(move |app_dir| {
@@ -67,23 +64,28 @@ impl Job {
         }
     }
 
-    pub fn move_file(filename: &'static Path, new_filename: &'static Path) -> Self {
+    pub fn move_file(filename: &Path, new_filename: &Path) -> Self {
+        let source = filename.to_path_buf();
+        let destination = new_filename.to_path_buf();
+        let rollback_source = source.clone();
+        let rollback_destination = destination.clone();
         Job {
             apply: Box::new(move |app_dir| {
-                let old_file = app_dir.join(filename);
-                let new_file = app_dir.join(new_filename);
+                let old_file = app_dir.join(&source);
+                let new_file = app_dir.join(&destination);
                 log::info!(
                     "Moving file: {}->{}",
                     old_file.display(),
                     new_file.display()
                 );
 
+                std::fs::create_dir_all(new_file.parent().context("No destination parent")?)?;
                 std::fs::rename(&old_file, new_file)
                     .context(format!("Failed to move file {}", old_file.display()))
             }),
             rollback: Box::new(move |app_dir| {
-                let old_file = app_dir.join(filename);
-                let new_file = app_dir.join(new_filename);
+                let old_file = app_dir.join(&rollback_source);
+                let new_file = app_dir.join(&rollback_destination);
                 log::info!(
                     "Rolling back file move: {}->{}",
                     old_file.display(),
@@ -99,6 +101,7 @@ impl Job {
         }
     }
 
+    #[cfg(test)]
     pub fn move_if_exists(filename: &'static Path, new_filename: &'static Path) -> Self {
         Job {
             apply: Box::new(move |app_dir| {
@@ -163,55 +166,89 @@ impl Job {
     }
 }
 
-#[cfg(not(test))]
-pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
-    fn p(value: &str) -> &Path {
-        Path::new(value)
+/// Plan the complete zip layout, preserving the installation directory and unmanaged files.
+pub(crate) fn layout_jobs(app_dir: &Path) -> Result<Vec<Job>> {
+    let app_dir = app_dir.canonicalize()?;
+    for name in ["install", "old", "updates"] {
+        anyhow::ensure!(!app_dir.join(name).is_symlink(), "Linked update directory");
     }
-    [
-        // Move old files
-        // Not deleting because installing new files can fail
-        Job::mkdir(p("old")),
-        Job::move_file(p("Zed.exe"), p("old\\Zed.exe")),
-        Job::mkdir(p("old\\bin")),
-        Job::move_file(p("bin\\Zed.exe"), p("old\\bin\\Zed.exe")),
-        Job::move_file(p("bin\\zed"), p("old\\bin\\zed")),
-        //
-        // TODO: remove after a few weeks once everyone is on the new version and this file never exists
-        Job::move_if_exists(p("OpenConsole.exe"), p("old\\OpenConsole.exe")),
-        Job::mkdir(p("old\\x64")),
-        Job::mkdir(p("old\\arm64")),
-        Job::move_if_exists(p("x64\\OpenConsole.exe"), p("old\\x64\\OpenConsole.exe")),
-        Job::move_if_exists(
-            p("arm64\\OpenConsole.exe"),
-            p("old\\arm64\\OpenConsole.exe"),
-        ),
-        //
-        Job::move_file(p("conpty.dll"), p("old\\conpty.dll")),
-        // Copy new files
-        Job::move_file(p("install\\Zed.exe"), p("Zed.exe")),
-        Job::move_file(p("install\\bin\\Zed.exe"), p("bin\\Zed.exe")),
-        Job::move_file(p("install\\bin\\zed"), p("bin\\zed")),
-        //
-        Job::mkdir_if_exists(p("x64"), p("install\\x64")),
-        Job::mkdir_if_exists(p("arm64"), p("install\\arm64")),
-        Job::move_if_exists(
-            p("install\\x64\\OpenConsole.exe"),
-            p("x64\\OpenConsole.exe"),
-        ),
-        Job::move_if_exists(
-            p("install\\arm64\\OpenConsole.exe"),
-            p("arm64\\OpenConsole.exe"),
-        ),
-        //
-        Job::move_file(p("install\\conpty.dll"), p("conpty.dll")),
-        // Cleanup installer and updates folder
-        Job::rmdir_nofail(p("updates")),
-        Job::rmdir_nofail(p("install")),
-        // Cleanup old installation
-        Job::rmdir_nofail(p("old")),
-    ]
-});
+    let install = app_dir.join("install");
+    anyhow::ensure!(
+        install.canonicalize()?.starts_with(&app_dir),
+        "Update stage is outside the app"
+    );
+    for required in ["Zed.exe", "bin/zed.exe", "tools/auto_update_helper.exe"] {
+        anyhow::ensure!(
+            install.join(required).is_file(),
+            "Update is missing {required}"
+        );
+    }
+    fn files(root: &Path, relative: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(root.join(relative))? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            anyhow::ensure!(!kind.is_symlink(), "Update contains a link");
+            let child = relative.join(entry.file_name());
+            anyhow::ensure!(
+                !["old", "install", "updates"]
+                    .iter()
+                    .any(|name| child.starts_with(name)),
+                "Reserved update path"
+            );
+            if kind.is_dir() {
+                files(root, &child, out)?;
+            } else if kind.is_file() {
+                out.push(child);
+            } else {
+                anyhow::bail!("Unsupported update entry");
+            }
+        }
+        Ok(())
+    }
+    let mut entries = Vec::new();
+    files(&install, Path::new(""), &mut entries)?;
+    entries.sort();
+    let old = app_dir.join("old");
+    if old.exists() {
+        anyhow::ensure!(
+            std::fs::read_dir(&old)?.next().is_none(),
+            "Previous update backup requires recovery"
+        );
+        std::fs::remove_dir(&old)?;
+    }
+    let mut jobs = vec![Job::mkdir(Path::new("old"))];
+    for relative in &entries {
+        let target = app_dir.join(relative);
+        let ancestor = target
+            .ancestors()
+            .find(|path| path.exists())
+            .context("No target ancestor")?;
+        anyhow::ensure!(
+            ancestor.canonicalize()?.starts_with(&app_dir),
+            "Target is outside the installation"
+        );
+        anyhow::ensure!(!target.is_symlink(), "Linked update target");
+        if target.exists() {
+            anyhow::ensure!(
+                target.is_file() && !target.is_symlink(),
+                "Update target is not a regular file"
+            );
+            jobs.push(Job::move_file(relative, &Path::new("old").join(relative)));
+        }
+    }
+    for relative in &entries {
+        jobs.push(Job::move_file(
+            &Path::new("install").join(relative),
+            relative,
+        ));
+    }
+    jobs.extend([
+        Job::rmdir_nofail(Path::new("updates")),
+        Job::rmdir_nofail(Path::new("install")),
+        Job::rmdir_nofail(Path::new("old")),
+    ]);
+    Ok(jobs)
+}
 
 #[cfg(test)]
 pub(crate) static JOBS: LazyLock<[Job; 9]> = LazyLock::new(|| {
@@ -271,98 +308,6 @@ pub(crate) static JOBS: LazyLock<[Job; 9]> = LazyLock::new(|| {
     ]
 });
 
-/// Attempts to use Windows Restart Manager to release file handles held by other processes
-/// (e.g., Explorer.exe) on the files we need to move during the update.
-///
-/// This is a best-effort operation - if it fails, we'll still try the update and rely on
-/// the retry logic.
-fn release_file_handles(app_dir: &Path) -> Result<()> {
-    // Files that commonly get locked by Explorer or other processes
-    let files_to_release = [
-        app_dir.join("Zed.exe"),
-        app_dir.join("bin\\Zed.exe"),
-        app_dir.join("bin\\zed"),
-        app_dir.join("conpty.dll"),
-    ];
-
-    log::info!("Attempting to release file handles using Restart Manager...");
-
-    let mut session: u32 = 0;
-    let mut session_key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
-
-    // Start a Restart Manager session
-    let err = unsafe {
-        RmStartSession(
-            &mut session,
-            Some(0),
-            PWSTR::from_raw(session_key.as_mut_ptr()),
-        )
-    };
-    if err.is_err() {
-        anyhow::bail!("RmStartSession failed: {err:?}");
-    }
-
-    // Ensure we end the session when done
-    let _session_guard = scopeguard::guard(session, |s| {
-        let _ = unsafe { RmEndSession(s) };
-    });
-
-    // Convert paths to wide strings for Windows API
-    let wide_paths: Vec<Vec<u16>> = files_to_release
-        .iter()
-        .filter(|p| p.exists())
-        .map(|p| {
-            OsStr::new(p)
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect()
-        })
-        .collect();
-
-    if wide_paths.is_empty() {
-        log::info!("No files to release handles for");
-        return Ok(());
-    }
-
-    let pcwstr_paths: Vec<PCWSTR> = wide_paths
-        .iter()
-        .map(|p| PCWSTR::from_raw(p.as_ptr()))
-        .collect();
-
-    // Register the files we want to modify
-    let err = unsafe { RmRegisterResources(session, Some(&pcwstr_paths), None, None) };
-    if err.is_err() {
-        anyhow::bail!("RmRegisterResources failed: {err:?}");
-    }
-
-    // Check if any processes are using these files
-    let mut needed: u32 = 0;
-    let mut count: u32 = 0;
-    let mut reboot_reasons: u32 = 0;
-    let _ = unsafe { RmGetList(session, &mut needed, &mut count, None, &mut reboot_reasons) };
-
-    if needed == 0 {
-        log::info!("No processes are holding handles to the files");
-        return Ok(());
-    }
-
-    log::info!(
-        "{} process(es) are holding handles to the files, requesting release...",
-        needed
-    );
-
-    // Request processes to release their handles
-    // RmShutdown with flags=0 asks applications to release handles gracefully
-    // For Explorer, this typically releases icon cache handles without closing Explorer
-    let err = unsafe { RmShutdown(session, 0, None) };
-    if err.is_err() {
-        anyhow::bail!("RmShutdown failed: {:?}", err);
-    }
-
-    log::info!("Successfully requested handle release");
-    Ok(())
-}
-
 #[allow(clippy::disallowed_methods, reason = "doesn't run in the main binary")]
 fn zed_launch_command(app_dir: &Path, launch_arguments: &[OsString]) -> std::process::Command {
     let mut command = std::process::Command::new(app_dir.join("Zed.exe"));
@@ -370,21 +315,17 @@ fn zed_launch_command(app_dir: &Path, launch_arguments: &[OsString]) -> std::pro
     command
 }
 
-pub(crate) fn perform_update(
+pub(crate) fn perform_jobs(
     app_dir: &Path,
     hwnd: Option<isize>,
     launch: bool,
     launch_arguments: &[OsString],
+    jobs: &[Job],
 ) -> Result<()> {
     let hwnd = hwnd.map(|ptr| HWND(ptr as _));
 
-    // Try to release file handles before starting the update
-    if let Err(e) = release_file_handles(app_dir) {
-        log::warn!("Restart Manager failed (will continue anyway): {}", e);
-    }
-
     let mut last_successful_job = None;
-    'outer: for (i, job) in JOBS.iter().enumerate() {
+    'outer: for (i, job) in jobs.iter().enumerate() {
         let start = Instant::now();
         loop {
             if start.elapsed().as_secs() > 2 {
@@ -394,7 +335,16 @@ pub(crate) fn perform_update(
             match (job.apply)(app_dir) {
                 Ok(_) => {
                     last_successful_job = Some(i);
-                    unsafe { PostMessageW(hwnd, WM_JOB_UPDATED, WPARAM(0), LPARAM(0))? };
+                    if let Some(hwnd) = hwnd {
+                        unsafe {
+                            PostMessageW(
+                                Some(hwnd),
+                                WM_JOB_UPDATED,
+                                WPARAM((i + 1) * 100 / jobs.len()),
+                                LPARAM(0),
+                            )?
+                        };
+                    }
                     break;
                 }
                 Err(err) => match err.downcast_ref::<std::io::Error>() {
@@ -418,7 +368,7 @@ pub(crate) fn perform_update(
     }
 
     if last_successful_job
-        .map(|job| job != JOBS.len() - 1)
+        .map(|job| job != jobs.len() - 1)
         .unwrap_or(true)
     {
         let Some(last_successful_job) = last_successful_job else {
@@ -426,7 +376,7 @@ pub(crate) fn perform_update(
         };
 
         for job in (0..=last_successful_job).rev() {
-            let job = &JOBS[job];
+            let job = &jobs[job];
             if let Err(e) = (job.rollback)(app_dir) {
                 anyhow::bail!(
                     "Job rollback failed, the app might be left in an inconsistent state: ({:?})",
@@ -452,7 +402,7 @@ pub(crate) fn perform_update(
 mod test {
     use std::{ffi::OsString, path::Path};
 
-    use super::{perform_update, zed_launch_command};
+    use super::{JOBS, perform_jobs, zed_launch_command};
 
     #[test]
     fn test_zed_launch_command_preserves_arguments() {
@@ -479,13 +429,13 @@ mod test {
     fn test_perform_update() {
         let app_dir = tempfile::tempdir().unwrap();
         let app_dir = app_dir.path();
-        assert!(perform_update(app_dir, None, false, &[]).is_ok());
+        assert!(perform_jobs(app_dir, None, false, &[], &*JOBS).is_ok());
 
         let app_dir = tempfile::tempdir().unwrap();
         let app_dir = app_dir.path();
         // Simulate a timeout
         unsafe { std::env::set_var("ZED_AUTO_UPDATE", "err1") };
-        let ret = perform_update(app_dir, None, false, &[]);
+        let ret = perform_jobs(app_dir, None, false, &[], &*JOBS);
         assert!(
             ret.is_err_and(|e| e.to_string().as_str() == "Autoupdate failed, nothing to rollback")
         );
@@ -494,10 +444,127 @@ mod test {
         let app_dir = app_dir.path();
         // Simulate a timeout
         unsafe { std::env::set_var("ZED_AUTO_UPDATE", "err2") };
-        let ret = perform_update(app_dir, None, false, &[]);
+        let ret = perform_jobs(app_dir, None, false, &[], &*JOBS);
         assert!(
             ret.is_err_and(|e| e.to_string().as_str() == "Autoupdate failed, rollback successful")
         );
         assert!(std::env::var("ZED_AUTO_UPDATE_RB").is_ok_and(|e| e == "rollback1"));
+    }
+    fn payload(app: &Path) {
+        for file in [
+            "Zed.exe",
+            "bin/zed.exe",
+            "tools/auto_update_helper.exe",
+            "amd_ags_x64.dll",
+        ] {
+            let target = app.join("install").join(file);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, format!("new:{file}")).unwrap();
+        }
+    }
+
+    #[test]
+    fn zip_layout_replaces_every_payload_file_and_preserves_unmanaged_files() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("Zed with spaces");
+        payload(&app);
+        std::fs::write(app.join("Zed.exe"), "old").unwrap();
+        std::fs::write(app.join("unins000.exe"), "uninstaller").unwrap();
+        std::fs::create_dir_all(app.join("updates")).unwrap();
+        std::fs::write(app.join("updates/versions.txt"), "ready").unwrap();
+        let jobs = super::layout_jobs(&app).unwrap();
+        super::perform_jobs(&app, None, false, &[], &jobs).unwrap();
+        for file in [
+            "Zed.exe",
+            "bin/zed.exe",
+            "tools/auto_update_helper.exe",
+            "amd_ags_x64.dll",
+        ] {
+            assert_eq!(
+                std::fs::read_to_string(app.join(file)).unwrap(),
+                format!("new:{file}")
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(app.join("unins000.exe")).unwrap(),
+            "uninstaller"
+        );
+        assert!(!app.join("updates/versions.txt").exists());
+    }
+
+    #[test]
+    fn interrupted_layout_swap_rolls_back_the_original_files() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path();
+        payload(app);
+        std::fs::write(app.join("Zed.exe"), "old").unwrap();
+        let jobs = super::layout_jobs(app).unwrap();
+        std::fs::remove_file(app.join("install/Zed.exe")).unwrap();
+        assert!(super::perform_jobs(app, None, false, &[], &jobs).is_err());
+        assert_eq!(std::fs::read_to_string(app.join("Zed.exe")).unwrap(), "old");
+        assert!(app.join("install/bin/zed.exe").is_file());
+    }
+
+    #[test]
+    fn incomplete_layout_never_moves_the_installed_executable() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("install")).unwrap();
+        std::fs::write(root.path().join("Zed.exe"), "old").unwrap();
+        assert!(super::layout_jobs(root.path()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("Zed.exe")).unwrap(),
+            "old"
+        );
+    }
+
+    #[test]
+    fn zip_swap_keeps_a_mapped_old_executable_running() {
+        use std::io::{BufRead, BufReader};
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path();
+        payload(app);
+        let test_binary = std::env::current_exe().unwrap();
+        std::fs::copy(&test_binary, app.join("Zed.exe")).unwrap();
+        std::fs::copy(&test_binary, app.join("install/Zed.exe")).unwrap();
+        let child = Command::new(app.join("Zed.exe"))
+            .args([
+                "--exact",
+                "updater::test::test_perform_update",
+                "--nocapture",
+            ])
+            .env_remove("ZED_AUTO_UPDATE")
+            .current_dir(std::env::temp_dir())
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW for the test fixture.
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = scopeguard::guard(child, |mut child| {
+            child.kill().ok();
+            child.wait().ok();
+        });
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("running 1 test") {
+            line.clear();
+            assert_ne!(output.read_line(&mut line).unwrap(), 0);
+        }
+        let jobs = super::layout_jobs(app).unwrap();
+        super::perform_jobs(app, None, false, &[], &jobs).unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        let installed = Command::new(app.join("Zed.exe"))
+            .arg("--list")
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(installed.status.success());
+        assert!(
+            String::from_utf8(installed.stdout)
+                .unwrap()
+                .contains("zip_swap_keeps_a_mapped_old_executable_running")
+        );
     }
 }

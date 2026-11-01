@@ -1,6 +1,6 @@
 # Builds this fork for macOS (Apple silicon) and Windows and publishes both in one GitHub
 # Release, tagged fork-v<version>-<commit10>. On macOS Zed updates itself from Zed-aarch64.dmg
-# (crates/auto_update/src/fork_release.rs); on Windows update-forks installs Zed-x86_64.zip.
+# (crates/auto_update/src/fork_release.rs); Windows stages Zed-x86_64.zip for exit/restart.
 # The two jobs run side by side, and whichever finishes first creates the release.
 # Every upstream workflow is removed from this fork; this is the only one.
 name: Fork bundle
@@ -49,6 +49,10 @@ jobs:
           if (-not (Test-Path $iscc)) { throw "Inno Setup 6 is missing: $iscc" }
           rustup show active-toolchain
 
+      - name: Test Windows update helper
+        shell: pwsh
+        run: cargo test -p auto_update_helper
+
       - name: Bundle
         shell: pwsh
         run: ./script/bundle-windows.ps1
@@ -73,7 +77,7 @@ jobs:
           $version = (Get-Content crates/zed/Cargo.toml | Select-String '^version = "(.+)"').Matches[0].Groups[1].Value
           $sha = $env:GITHUB_SHA.Substring(0, 10)
           $tag = "fork-v$version-$sha"
-          $notes = "Unsigned builds of qiulinfan/zed stable at $env:GITHUB_SHA (Zed $version). Zed-aarch64.dmg is what Zed on an Apple silicon Mac updates itself from; on Windows Zed-x86_64.zip is the install layout that update-forks puts in place and Zed-x86_64.exe the installer."
+          $notes = "Unsigned builds of qiulinfan/zed stable at $env:GITHUB_SHA (Zed $version). Zed-aarch64.dmg is what Zed on an Apple silicon Mac updates itself from; Windows updates itself from Zed-x86_64.zip and Zed-x86_64.exe is the installer."
           $assets = 'target/Zed-x86_64.zip', 'target/Zed-x86_64.exe', 'target/zed-remote-server-windows-x86_64.zip'
           gh release create $tag @assets --target $env:GITHUB_SHA --title "Zed $version (fork, $sha)" --notes $notes --latest
           if ($LASTEXITCODE -ne 0) {
@@ -141,7 +145,7 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1)"
           sha="${GITHUB_SHA:0:10}"
           tag="fork-v$version-$sha"
-          notes="Unsigned builds of qiulinfan/zed stable at $GITHUB_SHA (Zed $version). Zed-aarch64.dmg is what Zed on an Apple silicon Mac updates itself from; on Windows Zed-x86_64.zip is the install layout that update-forks puts in place and Zed-x86_64.exe the installer."
+          notes="Unsigned builds of qiulinfan/zed stable at $GITHUB_SHA (Zed $version). Zed-aarch64.dmg is what Zed on an Apple silicon Mac updates itself from; Windows updates itself from Zed-x86_64.zip and Zed-x86_64.exe is the installer."
           dmg=target/aarch64-apple-darwin/release/Zed-aarch64.dmg
           if ! gh release create "$tag" "$dmg" --target "$GITHUB_SHA" --title "Zed $version (fork, $sha)" --notes "$notes" --latest; then
             # The Windows job created it first.

@@ -24,6 +24,7 @@ const RELEASES_URL: &str = "https://api.github.com/repos/qiulinfan/zed/releases?
 pub fn fork_asset_name(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
         ("macos", "aarch64") => Some("Zed-aarch64.dmg"),
+        ("windows", "x86_64") => Some("Zed-x86_64.zip"),
         _ => None,
     }
 }
@@ -199,10 +200,10 @@ mod tests {
     }
 
     #[test]
-    fn test_fork_asset_only_for_apple_silicon_macs() {
+    fn test_fork_assets_for_supported_platforms() {
         assert_eq!(fork_asset_name("macos", "aarch64"), Some("Zed-aarch64.dmg"));
         assert_eq!(fork_asset_name("macos", "x86_64"), None);
-        assert_eq!(fork_asset_name("windows", "x86_64"), None);
+        assert_eq!(fork_asset_name("windows", "x86_64"), Some("Zed-x86_64.zip"));
         assert_eq!(fork_asset_name("linux", "x86_64"), None);
     }
 

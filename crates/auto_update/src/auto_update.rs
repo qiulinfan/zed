@@ -332,7 +332,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
             gpui::PromptLevel::Info,
             "This personal Zed build does not update itself here.",
             Some(&format!(
-                "{FORK_REPO} publishes self-updating builds only for Apple silicon Macs. Update it with update-forks."
+                "{FORK_REPO} publishes self-updating builds for Apple silicon Macs and x86-64 Windows. Update this platform with update-forks."
             )),
             &["OK"],
             cx,
@@ -414,14 +414,16 @@ struct InstallerDir(PathBuf);
 #[cfg(target_os = "windows")]
 impl InstallerDir {
     async fn new() -> Result<Self> {
-        let installer_dir = std::env::current_exe()?
+        let updates = std::env::current_exe()?
             .parent()
             .context("No parent dir for Zed.exe")?
             .join("updates");
-        if smol::fs::metadata(&installer_dir).await.is_ok() {
-            smol::fs::remove_dir_all(&installer_dir).await?;
-        }
-        smol::fs::create_dir(&installer_dir).await?;
+        anyhow::ensure!(!updates.is_symlink(), "Linked update directory");
+        smol::fs::create_dir_all(&updates).await?;
+        let installer_dir = tempfile::Builder::new()
+            .prefix("download-")
+            .tempdir_in(&updates)?
+            .keep();
         Ok(Self(installer_dir))
     }
 
@@ -956,7 +958,7 @@ impl AutoUpdater {
         let filename = match OS {
             "macos" => anyhow::Ok("Zed.dmg"),
             "linux" => Ok("zed.tar.gz"),
-            "windows" => Ok("Zed.exe"),
+            "windows" => Ok("Zed.zip"),
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }?;
 
@@ -1335,34 +1337,67 @@ async fn cleanup_windows() -> Result<()> {
         .context("No parent dir for Zed.exe")?
         .to_owned();
 
-    // keep in sync with crates/auto_update_helper/src/updater.rs
-    _ = smol::fs::remove_dir(parent.join("updates")).await;
-    _ = smol::fs::remove_dir(parent.join("install")).await;
-    _ = smol::fs::remove_dir(parent.join("old")).await;
+    // Keep a pending or failed transaction intact for the helper or recovery.
+    if parent.join("updates/versions.txt").exists() {
+        return Ok(());
+    }
+    for name in ["updates", "install", "old"] {
+        let folder = parent.join(name);
+        anyhow::ensure!(!folder.is_symlink(), "Linked update directory");
+        match smol::fs::remove_dir_all(&folder).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("cleaning {}", folder.display()));
+            }
+        }
+    }
 
     Ok(())
 }
 
-async fn install_release_windows(downloaded_installer: &Path) -> Result<Option<PathBuf>> {
-    let mut cmd = new_command(downloaded_installer);
-    cmd.arg("/verysilent")
-        .arg("/update=true")
-        .arg("/MERGETASKS=!desktopicon");
-    let output = cmd.output().await?;
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to start installer: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // We return the path to the update helper program, because it will
-    // perform the final steps of the update process, copying the new binary,
-    // deleting the old one, and launching the new binary.
-    let helper_path = std::env::current_exe()?
+async fn install_release_windows(downloaded_zip: &Path) -> Result<Option<PathBuf>> {
+    let app_dir = std::env::current_exe()?
         .parent()
         .context("No parent dir for Zed.exe")?
-        .join("tools")
-        .join("auto_update_helper.exe");
-    Ok(Some(helper_path))
+        .canonicalize()?;
+    stage_windows_release(downloaded_zip, &app_dir).await
+}
+
+async fn stage_windows_release(downloaded_zip: &Path, app_dir: &Path) -> Result<Option<PathBuf>> {
+    let unpacked = downloaded_zip
+        .parent()
+        .context("No download directory")?
+        .join("unpacked");
+    fs::create_dir_all(&unpacked).await?;
+    util::archive::extract_zip(&unpacked, File::open(downloaded_zip).await?).await?;
+    for required in ["Zed.exe", "bin/zed.exe", "tools/auto_update_helper.exe"] {
+        anyhow::ensure!(
+            unpacked.join(required).is_file(),
+            "Update is missing {required}"
+        );
+    }
+    let marker = app_dir.join("updates/versions.txt");
+    let old = app_dir.join("old");
+    anyhow::ensure!(!old.is_symlink(), "Linked update backup");
+    if old.exists() {
+        anyhow::ensure!(!marker.exists(), "Previous update requires recovery");
+        fs::remove_dir_all(&old).await?;
+    }
+
+    match fs::remove_file(&marker).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let install = app_dir.join("install");
+    anyhow::ensure!(!install.is_symlink(), "Linked update stage");
+    if install.exists() {
+        fs::remove_dir_all(&install).await?;
+    }
+    fs::rename(&unpacked, &install).await?;
+    fs::write(&marker, "fork-zip\n").await?;
+    Ok(Some(app_dir.join("tools/auto_update_helper.exe")))
 }
 
 pub async fn finalize_auto_update_on_quit() {
@@ -1415,6 +1450,50 @@ mod tests {
 
     pub(super) struct InstallOverride(pub Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>>);
     impl Global for InstallOverride {}
+
+    #[test]
+    fn test_fork_windows_zip_stages_without_replacing_the_running_app() {
+        let root = tempdir().unwrap();
+        let app = root.path();
+        std::fs::create_dir_all(app.join("updates/download-one")).unwrap();
+        std::fs::write(app.join("Zed.exe"), "installed").unwrap();
+        let zip = app.join("updates/download-one/Zed.zip");
+        std::fs::write(&zip, include_bytes!("../test/windows-layout.zip")).unwrap();
+        let helper = smol::block_on(stage_windows_release(&zip, app))
+            .unwrap()
+            .unwrap();
+        assert_eq!(helper, app.join("tools/auto_update_helper.exe"));
+        assert_eq!(
+            std::fs::read_to_string(app.join("Zed.exe")).unwrap(),
+            "installed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.join("install/Zed.exe")).unwrap(),
+            "new:Zed.exe"
+        );
+        assert!(app.join("updates/versions.txt").is_file());
+    }
+
+    #[test]
+    fn test_fork_windows_failed_download_preserves_a_ready_update() {
+        let root = tempdir().unwrap();
+        let app = root.path();
+        std::fs::create_dir_all(app.join("updates/download-two")).unwrap();
+        std::fs::create_dir_all(app.join("install")).unwrap();
+        std::fs::write(app.join("install/Zed.exe"), "pending").unwrap();
+        std::fs::write(app.join("updates/versions.txt"), "ready").unwrap();
+        let zip = app.join("updates/download-two/Zed.zip");
+        std::fs::write(&zip, "invalid zip").unwrap();
+        assert!(smol::block_on(stage_windows_release(&zip, app)).is_err());
+        assert_eq!(
+            std::fs::read_to_string(app.join("install/Zed.exe")).unwrap(),
+            "pending"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.join("updates/versions.txt")).unwrap(),
+            "ready"
+        );
+    }
 
     #[gpui::test]
     fn test_auto_update_defaults_to_true(cx: &mut TestAppContext) {

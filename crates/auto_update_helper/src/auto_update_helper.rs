@@ -24,7 +24,7 @@ mod windows_impl {
     };
 
     use super::dialog::create_dialog_window;
-    use super::updater::perform_update;
+    use super::updater::{layout_jobs, perform_jobs};
     use anyhow::{Context as _, Result};
     use windows::{
         Win32::{
@@ -58,15 +58,17 @@ mod windows_impl {
             .to_path_buf();
 
         log::info!("======= Starting Zed update =======");
+        let jobs = layout_jobs(&app_dir)?;
         let (tx, rx) = std::sync::mpsc::channel();
         let hwnd = create_dialog_window(rx)?.0 as isize;
         let args = parse_args(std::env::args_os().skip(1));
         std::thread::spawn(move || {
-            let result = perform_update(
+            let result = perform_jobs(
                 app_dir.as_path(),
                 Some(hwnd),
                 args.launch,
                 &args.launch_arguments,
+                &jobs,
             );
             tx.send(result).ok();
             unsafe { PostMessageW(Some(HWND(hwnd as _)), WM_TERMINATE, WPARAM(0), LPARAM(0)) }.ok();

@@ -11,7 +11,7 @@ use windows::{
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Controls::{PBM_SETRANGE, PBM_SETSTEP, PBM_STEPIT, PROGRESS_CLASS},
+            Controls::{PBM_SETPOS, PBM_SETRANGE, PROGRESS_CLASS},
             WindowsAndMessaging::{
                 CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
                 GWLP_USERDATA, GetDesktopWindow, GetWindowLongPtrW, GetWindowRect, HICON,
@@ -26,10 +26,7 @@ use windows::{
     core::HSTRING,
 };
 
-use crate::{
-    updater::JOBS,
-    windows_impl::{WM_JOB_UPDATED, WM_TERMINATE, show_error},
-};
+use crate::windows_impl::{WM_JOB_UPDATED, WM_TERMINATE, show_error};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -137,13 +134,7 @@ unsafe extern "system" fn wnd_proc(
                 None,
                 None,
             ));
-            SendMessageW(
-                progress_bar,
-                PBM_SETRANGE,
-                None,
-                Some(make_lparam!(0, JOBS.len() * 10)),
-            );
-            SendMessageW(progress_bar, PBM_SETSTEP, Some(WPARAM(10)), None);
+            SendMessageW(progress_bar, PBM_SETRANGE, None, Some(make_lparam!(0, 100)));
             with_dialog_data(hwnd, |data| {
                 data.borrow_mut().progress_bar = progress_bar.0 as isize
             });
@@ -182,7 +173,7 @@ unsafe extern "system" fn wnd_proc(
         },
         WM_JOB_UPDATED => with_dialog_data(hwnd, |data| {
             let progress_bar = data.borrow().progress_bar;
-            unsafe { SendMessageW(HWND(progress_bar as _), PBM_STEPIT, None, None) }
+            unsafe { SendMessageW(HWND(progress_bar as _), PBM_SETPOS, Some(wparam), None) }
         }),
         WM_TERMINATE => {
             with_dialog_data(hwnd, |data| {
