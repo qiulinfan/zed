@@ -12,7 +12,10 @@ Welcome to Zed, a high-performance, multiplayer code editor from the creators of
 
 ### Installation
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+This fork distributes builds through [qiulinfan/zed Releases](https://github.com/qiulinfan/zed/releases).
+Apple silicon macOS and x86-64 Windows check that repository for updates automatically.
+Windows downloads the ZIP and applies it in place on quit or restart, preserving settings,
+workspaces and shortcuts. Source synchronization with upstream is a separate step.
 
 Other platforms are not yet available:
 
