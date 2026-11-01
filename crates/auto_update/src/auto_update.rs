@@ -32,6 +32,9 @@ use std::{
 use util::command::new_command;
 use workspace::Workspace;
 
+mod fork_release;
+pub use fork_release::FORK_REPO;
+
 const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
 
 #[derive(Debug)]
@@ -282,9 +285,11 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
             .map(|channel| channel.poll_for_updates())
             .unwrap_or(false);
 
+        // This fork updates only where its releases carry a build (fork_release.rs).
         if option_env!("ZED_UPDATE_EXPLANATION").is_none()
             && env::var("ZED_UPDATE_EXPLANATION").is_err()
             && poll_for_updates
+            && fork_release::fork_asset_name(OS, ARCH).is_some()
         {
             let mut update_subscription = AutoUpdateSetting::get_global(cx)
                 .0
@@ -316,6 +321,19 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
             gpui::PromptLevel::Info,
             "Zed was installed via a package manager.",
             Some(&message),
+            &["OK"],
+            cx,
+        ));
+        return;
+    }
+
+    if fork_release::fork_asset_name(OS, ARCH).is_none() {
+        drop(window.prompt(
+            gpui::PromptLevel::Info,
+            "This personal Zed build does not update itself here.",
+            Some(&format!(
+                "{FORK_REPO} publishes self-updating builds only for Apple silicon Macs. Update it with update-forks."
+            )),
             &["OK"],
             cx,
         ));
@@ -738,7 +756,7 @@ impl AutoUpdater {
     }
 
     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
-        let (client, installed_version, previous_status, release_channel) =
+        let (client, installed_version, previous_status, _release_channel) =
             this.read_with(cx, |this, cx| {
                 (
                     this.client.http_client(),
@@ -756,17 +774,29 @@ impl AutoUpdater {
             cx.notify();
         });
 
-        let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
-        let fetched_version = fetched_release_data.clone().version;
-        let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
-        let newer_version = Self::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version,
-            previous_status.clone(),
-        )?;
+        // This fork installs only its own releases, never zed.dev's builds.
+        let asset = fork_release::fork_asset_name(OS, ARCH)
+            .with_context(|| format!("{FORK_REPO} publishes no build for {OS} {ARCH}"))?;
+        let release = fork_release::latest_release(&*client, asset).await?;
+        let app_commit_sha = cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full()));
+        let newer_version = match &previous_status {
+            // Downloaded already; only a later release replaces it before the restart.
+            AutoUpdateStatus::Updated { version } if *version == release.version => None,
+            _ => {
+                let relation = fork_release::relation(
+                    &*client,
+                    &release,
+                    &installed_version,
+                    app_commit_sha.as_deref(),
+                )
+                .await?;
+                (relation == fork_release::Relation::Newer).then(|| release.version.clone())
+            }
+        };
+        let fetched_release_data = ReleaseAsset {
+            version: release.version.to_string(),
+            url: release.url,
+        };
 
         let Some(newer_version) = newer_version else {
             this.update(cx, |this, cx| {
@@ -865,6 +895,8 @@ impl AutoUpdater {
         Ok(())
     }
 
+    // Upstream's zed.dev comparison, kept for its tests; fork_release.rs decides here.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn check_if_fetched_version_is_newer(
         release_channel: ReleaseChannel,
         app_commit_sha: Result<Option<String>>,
@@ -957,6 +989,7 @@ impl AutoUpdater {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn check_if_fetched_version_is_newer_non_nightly(
         mut installed_version: Version,
         fetched_version: Version,
@@ -1398,6 +1431,8 @@ mod tests {
         });
     }
 
+    // The fork publishes updates only for Apple silicon Macs (fork_release.rs).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[gpui::test]
     async fn test_auto_update_downloads(cx: &mut TestAppContext) {
         cx.background_executor.allow_parking();
@@ -1419,17 +1454,14 @@ mod tests {
                 let release_available = release_available.load(atomic::Ordering::Relaxed);
                 let dmg_rx = dmg_rx.clone();
                 async move {
-                if req.uri().path() == "/releases/stable/latest/asset" {
-                    if release_available {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.1","url":"https://test.example/new-download"}"#.into()
-                        ).unwrap());
+                if req.uri().path() == "/repos/qiulinfan/zed/releases" {
+                    let releases = if release_available {
+                        r#"[{"tag_name":"fork-v0.100.1-aaaaaaaaaa","target_commitish":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","draft":false,"prerelease":false,"published_at":"2026-11-01T07:00:00Z","assets":[{"name":"Zed-aarch64.dmg","browser_download_url":"https://github.com/qiulinfan/zed/releases/download/fork-v0.100.1-aaaaaaaaaa/Zed-aarch64.dmg"}]}]"#
                     } else {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.0","url":"https://test.example/old-download"}"#.into()
-                        ).unwrap());
-                    }
-                } else if req.uri().path() == "/new-download" {
+                        "[]"
+                    };
+                    return Ok(Response::builder().status(200).body(releases.into()).unwrap());
+                } else if req.uri().path() == "/qiulinfan/zed/releases/download/fork-v0.100.1-aaaaaaaaaa/Zed-aarch64.dmg" {
                     return Ok(Response::builder().status(200).body({
                         let dmg_rx = dmg_rx.lock().take().unwrap();
                         dmg_rx.await.unwrap().into()
@@ -1467,7 +1499,7 @@ mod tests {
         assert_eq!(
             status,
             AutoUpdateStatus::Downloading {
-                version: semver::Version::new(0, 100, 1),
+                version: "0.100.1+aaaaaaaaaa".parse().unwrap(),
                 progress: None,
             }
         );
@@ -1498,7 +1530,7 @@ mod tests {
         assert_eq!(
             status,
             AutoUpdateStatus::Updated {
-                version: semver::Version::new(0, 100, 1)
+                version: "0.100.1+aaaaaaaaaa".parse().unwrap()
             }
         );
         let will_restart = cx.expect_restart();

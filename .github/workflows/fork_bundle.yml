@@ -1,0 +1,158 @@
+# Builds this fork for macOS (Apple silicon) and Windows and publishes both in one GitHub
+# Release, tagged fork-v<version>-<commit10>. On macOS Zed updates itself from Zed-aarch64.dmg
+# (crates/auto_update/src/fork_release.rs); on Windows update-forks installs Zed-x86_64.zip.
+# The two jobs run side by side, and whichever finishes first creates the release.
+# Every upstream workflow is removed from this fork; this is the only one.
+name: Fork bundle
+
+on:
+  push:
+    branches:
+      - stable
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    # windows-2022 ships Visual Studio 2022 with the Spectre-mitigated libs and Inno Setup 6,
+    # which script/bundle-windows.ps1 expects.
+    runs-on: windows-2022
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Put the target directory on the larger drive
+        shell: pwsh
+        run: |
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='FreeGB';e={[int]($_.Free/1GB)}}
+          $drive = (Get-PSDrive -PSProvider FileSystem | Sort-Object Free -Descending | Select-Object -First 1).Root
+          $target = Join-Path $drive 'zed-target'
+          New-Item -ItemType Directory -Force $target | Out-Null
+          if ((Resolve-Path .).Path.Substring(0, 3) -ne $drive) {
+            New-Item -ItemType Junction -Path target -Target $target | Out-Null
+          }
+          Write-Output "target -> $target"
+
+      - name: Check build prerequisites
+        shell: pwsh
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "Inno Setup 6 is missing: $iscc" }
+          rustup show active-toolchain
+
+      - name: Bundle
+        shell: pwsh
+        run: ./script/bundle-windows.ps1
+
+      # The installed layout without the installer, so a machine replaces its
+      # %LOCALAPPDATA%\Programs\Zed in place and its shortcuts keep working. The
+      # unsigned appx for the Explorer menu and the arm64 console are left out.
+      - name: Package the install layout
+        shell: pwsh
+        run: |
+          $layout = 'inno/x86_64'
+          $items = 'Zed.exe', 'conpty.dll', 'amd_ags_x64.dll', 'bin', 'tools', 'x64' | ForEach-Object { Join-Path $layout $_ }
+          $missing = $items | Where-Object { -not (Test-Path $_) }
+          if ($missing) { throw "Missing from the bundle layout: $($missing -join ', ')" }
+          Compress-Archive -Path $items -DestinationPath target/Zed-x86_64.zip -Force
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content crates/zed/Cargo.toml | Select-String '^version = "(.+)"').Matches[0].Groups[1].Value
+          $sha = $env:GITHUB_SHA.Substring(0, 10)
+          $tag = "fork-v$version-$sha"
+          $notes = "Unsigned builds of qiulinfan/zed stable at $env:GITHUB_SHA (Zed $version). Zed-aarch64.dmg is what Zed on an Apple silicon Mac updates itself from; on Windows Zed-x86_64.zip is the install layout that update-forks puts in place and Zed-x86_64.exe the installer."
+          $assets = 'target/Zed-x86_64.zip', 'target/Zed-x86_64.exe', 'target/zed-remote-server-windows-x86_64.zip'
+          gh release create $tag @assets --target $env:GITHUB_SHA --title "Zed $version (fork, $sha)" --notes $notes --latest
+          if ($LASTEXITCODE -ne 0) {
+            # The macOS job created it first.
+            gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw "could not publish to $tag" }
+          }
+
+      - name: Keep the installer as a run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-windows-x86_64
+          path: |
+            target/Zed-x86_64.zip
+            target/Zed-x86_64.exe
+            target/zed-remote-server-windows-x86_64.zip
+          if-no-files-found: ignore
+          retention-days: 14
+
+  macos:
+    # macos-15 runs on Apple silicon: 3 cores, 7 GB of memory, and a disk too small for Zed's
+    # release target until the preinstalled SDKs it does not need are removed.
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          df -h /
+          selected="$(dirname "$(dirname "$(xcode-select -p)")")"
+          for xcode in /Applications/Xcode*.app; do
+            if [ "$xcode" != "$selected" ]; then sudo rm -rf "$xcode"; fi
+          done
+          sudo rm -rf ~/Library/Android /usr/local/share/dotnet ~/.dotnet /usr/local/lib/node_modules/@aws-cdk
+          xcrun simctl delete all || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* || true
+          df -h /
+
+      - name: Check build prerequisites
+        run: |
+          xcodebuild -version
+          # `xcrun -f metal` finds the shim even without the component; running it tells.
+          if ! xcrun metal --version >/dev/null 2>&1; then xcodebuild -downloadComponent MetalToolchain; fi
+          xcrun metal --version
+          rustup show active-toolchain
+
+      - name: Bundle
+        run: script/bundle-mac aarch64-apple-darwin
+
+      - name: Check the bundle updates only from this fork
+        run: |
+          binary="target/aarch64-apple-darwin/release/dmg/Zed.app/Contents/MacOS/zed"
+          grep -q "api.github.com/repos/qiulinfan/zed/releases" "$binary"
+          ls -l target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1)"
+          sha="${GITHUB_SHA:0:10}"
+          tag="fork-v$version-$sha"
+          notes="Unsigned builds of qiulinfan/zed stable at $GITHUB_SHA (Zed $version). Zed-aarch64.dmg is what Zed on an Apple silicon Mac updates itself from; on Windows Zed-x86_64.zip is the install layout that update-forks puts in place and Zed-x86_64.exe the installer."
+          dmg=target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+          if ! gh release create "$tag" "$dmg" --target "$GITHUB_SHA" --title "Zed $version (fork, $sha)" --notes "$notes" --latest; then
+            # The Windows job created it first.
+            gh release upload "$tag" "$dmg" --clobber
+          fi
+
+      - name: Keep the dmg as a run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-macos-aarch64
+          path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+          if-no-files-found: ignore
+          retention-days: 14
