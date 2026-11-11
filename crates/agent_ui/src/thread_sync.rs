@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use agent::ThreadStore;
-use agent_client_protocol::schema::v2 as acp;
+use agent_client_protocol::v2::schema as acp;
 use agent_servers::AcpConnection;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
